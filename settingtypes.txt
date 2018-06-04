@@ -1,0 +1,5 @@
+#The number of blocks that can be active at the same time
+dynamic_forceload_active_limit (Active limit) int 8
+
+#The number of seconds between updates to which blocks are active
+dynamic_forceload_rotation_time (Rotation time) int 60
