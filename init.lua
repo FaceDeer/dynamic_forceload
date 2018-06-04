@@ -5,13 +5,51 @@ local S, NS = dofile(MP.."/intllib.lua")
 local worldpath = minetest.get_worldpath()
 local forceload_filename = worldpath.."/dynamic_forceload.json"
 
+-- in-memory copy of data stored in dynamic_forceload.json
+local forceload_data = {}
+
 minetest.register_privilege("forceload", { description = "Allows players to use forceload block anchors", give_to_singleplayer = false})
+
+local get_forceloads_for = function(name)
+	local positions = forceload_data[name]
+	local output
+	if positions then
+		output = name .. "'s forceload anchors are at:"
+		for _, pos in ipairs(positions) do
+			output = output .. " " .. minetest.pos_to_string(pos)
+		end
+	else
+		output = name .. " has no active forceload anchors registered."
+	end
+	return output
+end
+
+minetest.register_chatcommand("forceloads", {
+    params = "[<name>]", -- Short parameter description
+    description = "Show your forceload anchor positions, or another player's if you have server privilege.",
+    func = function(name, param)
+		if param == nil or forcelparam == "" then
+			return true, get_forceloads_for(name)
+		elseif minetest.check_player_privs(name, {server = true}) then
+			if params ~= "all" then
+				return true, get_forceloads_for(params)
+			else
+				local output = ""
+				for player, _ in pairs(forceload_data) do
+					output = output .. "\n" .. get_forceloads_for(player)
+				end
+				return true, output
+			end
+		else
+			return false, "You need the server privilege to view other players' forceload anchor positions."
+		end
+		-- Returns boolean success and text output.
+	end,                                      
+})
 
 local rotation_time = tonumber(minetest.setting_get("dynamic_forceload_rotation_time")) or 60
 local active_limit = tonumber(minetest.setting_get("dynamic_forceload_active_limit")) or 8
 
--- in-memory copy of data stored in dynamic_forceload.json
-local forceload_data = {}
 
 local save_data = function()
 	local file = io.open(forceload_filename, "w")
