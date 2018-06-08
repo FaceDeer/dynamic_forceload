@@ -43,3 +43,25 @@ As the queue advances the following sequence of events will occur:
 As you can see, players in this scenario with only one anchor will have that anchor forceloaded 80% of the time. If they have two anchors, however, each of those anchors will only be loaded 40% of the time. And Eve, with her huge list of anchors, will only have each of her anchors forceloaded 10% of the time. In this way each player gets the same slice of forceload resources and can allocate their time as they see fit.
 
 Since it is still possible for a griefer with multiple accounts to slow things down for everyone by having each of his accounts place a forceload block, it is recommended that the "forceload" privilege be given with some restraint. However, this mod greatly limits the damage that rampant forceload anchor placement could potentially cause, making it something that can be given fairly freely.
+
+## API
+
+Other mods can make use of this mod's API to define their own forceload anchors.
+
+```
+dynamic_forceload.add_anchor(pos, player_name, usurp_active)
+```
+
+Adds a new dynamic forceload anchor at position pos, belonging to player player_name. Usurp_active is an optional flag, if it's set true then the new anchor will replace the most recently-activated anchor belonging to that player (if one is active - if not it behaves as if usurp_active was not set).
+
+```
+dynamic_forceload.remove_anchor(pos)
+```
+
+Removes the forceload anchor at position pos
+
+```
+dynamic_forceload.move_anchor(old_pos, new_pos, player_name_check)
+```
+
+Moves an anchor from old_pos to new_pos. player_name_check is optional, if you put a player's name here then the code will only move the anchor if it belongs to him. Otherwise it moves it regardless of who owns it.

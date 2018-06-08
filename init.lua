@@ -1,14 +1,27 @@
 dynamic_forceload = {} -- container for globals
 
--- internationalization boilerplate
-local MP = minetest.get_modpath(minetest.get_current_modname())
-local S, NS = dofile(MP.."/intllib.lua")
+local modpath = minetest.get_modpath(minetest.get_current_modname())
+dofile(modpath.."/nodes.lua")
 
 local worldpath = minetest.get_worldpath()
 local forceload_filename = worldpath.."/dynamic_forceload.json"
 
 -- in-memory copy of data stored in dynamic_forceload.json
 local forceload_data = {}
+
+local BLOCKSIZE = core.MAP_BLOCKSIZE
+local function get_blockpos(pos)
+	return {
+		x = math.floor(pos.x/BLOCKSIZE),
+		y = math.floor(pos.y/BLOCKSIZE),
+		z = math.floor(pos.z/BLOCKSIZE)}
+end
+local active_block_range = tonumber(minetest.settings:get("active_block_range")) or 3
+--local function overlapping_activation(pos1, pos2)
+--	local blockpos1 = get_blockpos(pos1)
+--	local blockpos2 = get_blockpos(pos2)
+--	return vector.distance(blockpos1, blockpos2) < BLOCKSIZE * 2 * active_block_range
+--end
 
 local hard_limit = tonumber(minetest.settings:get("max_forceloaded_blocks")) or 16
 local rotation_time = tonumber(minetest.setting_get("dynamic_forceload_rotation_time")) or 60
@@ -17,6 +30,10 @@ local active_limit = math.min(tonumber(minetest.setting_get("dynamic_forceload_a
 local player_current_index = {}
 local latest_player
 local active_positions = {}
+
+-- predeclare some local functions
+local call_on_forceload_block
+local rotate_active
 
 minetest.register_privilege("forceload", { description = "Allows players to use forceload block anchors", give_to_singleplayer = false})
 
@@ -83,6 +100,45 @@ local read_data = function()
 	end
 end
 
+-- use these methods to ensure callbacks are triggered
+local forceload_free_block = function(deactivating_pos)
+	local deactivating_def = minetest.registered_nodes[minetest.get_node(deactivating_pos).name]
+	if deactivating_def.on_forceload_free_block then
+		deactivating_def.on_forceload_free_block(deactivating_pos)
+	end
+	minetest.forceload_free_block(deactivating_pos, true)
+end
+
+call_on_forceload_block = function(pos, player_name, count)
+	local nodename = minetest.get_node(pos).name
+	if nodename == "ignore" then
+		--block hasn't loaded yet, try again in a second.
+		if count < 60 then
+			minetest.after(1, call_on_forceload_block, pos, player_name, count+1)
+		else
+			minetest.log("error", "[dynamic_forceload] call_on_forceload_block "..
+				"made 60 attempts to trigger on_forceload_block callback on node " ..
+				" at " .. minetest.pos_to_string(pos) .. " on behalf of " ..
+				player_name .. " without success, giving up.")
+		end
+	else
+		local activating_def = minetest.registered_nodes[nodename]
+		if activating_def.on_forceload_block then
+			activating_def.on_forceload_block(pos, player_name)
+		end
+	end
+end
+
+local forceload_block = function(new_pos, next_player)
+	if not minetest.forceload_block(new_pos, true) then
+		minetest.log("error", "[dynamic_forceload] Unable to forceload block at position " ..
+			minetest.pos_to_string(new_pos) .. " on behalf of player " .. next_player ..
+			" - possibly exceeded hard forceload limit?")
+	else
+		call_on_forceload_block(new_pos, next_player, 0)
+	end
+end
+
 -- Adds the anchor pos to the forceload_data.
 -- If usurp_active is true and the player already has a forceloaded
 -- position active, then pos will replace that position immediately.
@@ -108,7 +164,13 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 			local active_pos = active_positions[i]
 			for _, player_pos in ipairs(player_data) do
 				if vector.equals(active_pos, player_pos) then
+					local old_pos = active_positions[i]
 					active_positions[i] = pos
+					-- update the forceload if the usurped position is in a new map block
+					if not vector.equals(get_blockpos(old_pos), get_blockpos(pos)) then
+						forceload_free_block(old_pos)
+						forceload_block(pos, player_name)
+					end
 					return
 				end
 			end
@@ -116,11 +178,42 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 	end	
 end
 
-local rotate_active
+-- If player_name_check is not nil, will check to ensure that the player owns the
+-- forceload anchor before moving it.
+dynamic_forceload.move_anchor = function(old_pos, new_pos, player_name_check)
+	for player, pos_list in pairs(forceload_data) do
+		for i, anchor_pos in ipairs(pos_list) do
+			if vector.equals(anchor_pos, old_pos) then
+				if player_name_check == nil or player_name_check == player then
+					pos_list[i] = new_pos
+					for j, active_pos in ipairs(active_positions) do
+						if active_pos == anchor_pos then
+							active_positions[j] = new_pos
+							-- update the forceload if the new position is in a new map block
+							if not vector.equals(get_blockpos(old_pos), get_blockpos(new_pos)) then
+								forceload_free_block(old_pos)
+								forceload_block(new_pos, player)
+							end
+						end
+					end
+					return true
+				else
+					minetest.log("action", "[dynamic_forceload] unable to move forceload " ..
+						minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos) ..
+						": anchor belongs to player " .. player .. " but name check was set to " ..
+						player_name_check)
+					return false
+				end
+			end
+		end
+	end
+	minetest.log("error", "[dynamic_forceload] unable to move forceload " ..
+		minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos) ..
+		": old anchor position was not registered.")
+	return false
+end
 
 dynamic_forceload.remove_anchor = function(pos)
-	minetest.forceload_free_block(pos, true) -- always do this just to be on the safe side
-	
 	-- remove from forceload_data
 	for player, pos_list in pairs(forceload_data) do
 		for i, anchor_pos in ipairs(pos_list) do
@@ -134,8 +227,9 @@ dynamic_forceload.remove_anchor = function(pos)
 				-- If the position is currently forceloaded, remove it and trigger an update
 				for i, active_pos in ipairs(active_positions) do
 					if vector.equals(pos, active_pos) then
+						forceload_free_block(pos)
 						table.remove(active_pos, i)
-						rotate_active()						
+						rotate_active()
 						break
 					end
 				end
@@ -145,74 +239,6 @@ dynamic_forceload.remove_anchor = function(pos)
 		end
 	end
 end
-
-local call_on_forceload_block
-call_on_forceload_block = function(pos, player_name)
-	local nodename = minetest.get_node(pos).name
-	--minetest.debug("activating node " .. nodename)
-	if nodename == "ignore" then
-		--block hasn't loaded yet, try again in a second.
-		minetest.after(1, call_on_forceload_block, pos, player_name)	
-	else
-		local activating_def = minetest.registered_nodes[nodename]
-		if activating_def.on_forceload_block then
-			activating_def.on_forceload_block(pos, player_name)
-		end
-	end
-end
-
-minetest.register_node("dynamic_forceload:anchor_inert",{
-	description = S("Inert Time Anchor"),
-	_doc_items_longdesc = S("A magical block that can bend time itself, causing the world to continue running in its vicinity even when the player who placed it is not nearby or online. This one seems to be inactive, however."),
-    _doc_items_usagehelp = S("Place the block to cause the local surroundings to continue running. Remove the block to restore the flow of time to normal."),
-	walkable = false,
-	drop = "dynamic_forceload:anchor",
-	tiles = {"dynamic_forceload_anchor_top.png", "dynamic_forceload_anchor_top.png", "dynamic_forceload_anchor.png"},
-	groups = {cracky = 3, oddly_breakable_by_hand = 2, not_in_creative_inventory = 1},
-})
-
-minetest.register_node("dynamic_forceload:anchor",{
-	description = S("Time Anchor"),
-	_doc_items_longdesc = S("A magical block that can bend time itself, causing the world to continue running in its vicinity even when the player who placed it is not nearby or online."),
-    _doc_items_usagehelp = S("Place the block to cause the local surroundings to continue running. Remove the block to restore the flow of time to normal."),
-	walkable = false,
-	tiles = {"dynamic_forceload_anchor_top.png", "dynamic_forceload_anchor_top.png", {name="dynamic_forceload_anchor_anim.png", animation={
-        type = "vertical_frames",
-        aspect_w = 16,
-        aspect_h = 16,
-        length = 2.0,
-    }}},
-	groups = {cracky = 3, oddly_breakable_by_hand = 2},
-	after_destruct = function(pos)
-		dynamic_forceload.remove_anchor(pos)
-		save_data()
-	end,
-	after_place_node = function(pos, placer)
-		if not minetest.check_player_privs(placer:get_player_name(),
-				{forceload = true}) then
-			minetest.chat_send_player(placer:get_player_name(), S("The forceload privilege is required to register this location for continued timeflow."))
-			minetest.swap_node(pos, {name="dynamic_forceload:anchor_inert"})
-		else
-			dynamic_forceload.add_anchor(pos, placer:get_player_name())
-		end
---		minetest.get_node_timer(pos):start(1)
-	end,
-	
---	on_forceload_block = function(pos, name)
---		minetest.debug("On forceload block called at " .. minetest.pos_to_string(pos) .. " on behalf of player " .. name)
---		minetest.get_node_timer(pos):start(1)
---	end,
---	on_forceload_free_block = function(pos)
---		minetest.debug("On forceload free block called at " .. minetest.pos_to_string(pos))
---		minetest.get_node_timer(pos):stop()
---	end,
---	on_timer = function(pos, elapsed)
---		minetest.chat_send_all("dynamic_forceload at " .. minetest.pos_to_string(pos) .. " ticked.")
---		minetest.get_node_timer(pos):start(1)
---	end,
-})
-
-read_data()
 
 rotate_active = function()
 	--minetest.debug("rotate_active called")
@@ -254,26 +280,34 @@ rotate_active = function()
 	-- if we're over the limit, remove the oldest active position
 	if table.getn(active_positions) > active_limit then
 		local deactivating_pos = active_positions[1]
-		local deactivating_def = minetest.registered_nodes[minetest.get_node(deactivating_pos).name]
-		if deactivating_def.on_forceload_free_block then
-			deactivating_def.on_forceload_free_block(deactivating_pos)
-		end
-		
-		minetest.forceload_free_block(deactivating_pos, true)
+		forceload_free_block(deactivating_pos)
 		--minetest.debug("Over active limit, removing " .. minetest.pos_to_string(active_positions[1]))
 		table.remove(active_positions, 1)
 	end	
 	
 	-- forceload *after* free_block is called in case these nodes are in the same block or in case we're at the hard limit
-	if not minetest.forceload_block(new_pos, true) then
-		dynamic_forceload.remove_anchor(new_pos)
-		minetest.log("error", "[dynamic_forceload] Unable to forceload block at position " .. minetest.pos_to_string(new_pos) .. ", anchor removed from anchor list.")
-	else
-		minetest.after(1, call_on_forceload_block, new_pos, next_player)
-	end
+	forceload_block(new_pos, next_player)
 end
 
-local timer = rotation_time -- start at rotation time so that rotate_active() is called immediately to get things started.
+read_data()
+
+-- After initializing immediately fill the queue with an initial set of forceloads
+minetest.after(1, function()
+	local count = 0
+	for _, position_list in pairs(forceload_data) do
+		count = count + table.getn(position_list)
+		if count > active_limit then
+			count = active_limit
+			break
+		end
+	end
+	while count > 0 do
+		rotate_active()
+		count = count - 1
+	end
+end)
+
+local timer = 0
 minetest.register_globalstep(function(dtime)
 	timer = timer + dtime
 	if timer > rotation_time then
@@ -281,14 +315,3 @@ minetest.register_globalstep(function(dtime)
 		rotate_active()
 	end
 end)
-
-if minetest.get_modpath("default") then
-	minetest.register_craft({
-		output = "dynamic_forceload:anchor",
-		recipe = {
-			{"default:mese_crystal_fragment", "default:mese_crystal_fragment", "default:mese_crystal_fragment"},
-			{"default:glass", "default:mese_crystal", "default:glass"},
-			{"default:glass", "default:glass", "default:glass"}
-		}
-	})
-end
