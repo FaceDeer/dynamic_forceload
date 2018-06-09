@@ -8,6 +8,10 @@ local forceload_filename = worldpath.."/dynamic_forceload.json"
 
 -- in-memory copy of data stored in dynamic_forceload.json
 local forceload_data = {}
+forceload_data.players = {}
+-- Forceloaded positions that are currently active but that should be
+-- removed from forceload_data as soon as they're no longer active
+forceload_data.pending_removal = {}
 
 local BLOCKSIZE = core.MAP_BLOCKSIZE
 local function get_blockpos(pos)
@@ -40,7 +44,7 @@ minetest.register_privilege("forceload", { description = "Allows players to use 
 -- Chat command
 
 local get_forceloads_for = function(name)
-	local positions = forceload_data[name]
+	local positions = forceload_data.players[name]
 	local output
 	if positions then
 		output = name .. "'s forceload anchors are at:"
@@ -64,7 +68,7 @@ minetest.register_chatcommand("forceloads", {
 				return true, get_forceloads_for(param)
 			else
 				local output = ""
-				for player, _ in pairs(forceload_data) do
+				for player, _ in pairs(forceload_data.players) do
 					output = output .. "\n" .. get_forceloads_for(player)
 				end
 				return true, output
@@ -72,7 +76,6 @@ minetest.register_chatcommand("forceloads", {
 		else
 			return false, "You need the server privilege to view other players' forceload anchor positions."
 		end
-		-- Returns boolean success and text output.
 	end,                                      
 })
 
@@ -96,6 +99,8 @@ local read_data = function()
 	end
 	if forceload_data == nil then
 		forceload_data = {}
+		forceload_data.players = {}
+		forceload_data.pending_removal = {}
 		save_data()
 	end
 end
@@ -106,6 +111,7 @@ local forceload_free_block = function(deactivating_pos)
 	if deactivating_def.on_forceload_free_block then
 		deactivating_def.on_forceload_free_block(deactivating_pos)
 	end
+	minetest.debug("forcload_free_block at " .. minetest.pos_to_string(deactivating_pos))
 	minetest.forceload_free_block(deactivating_pos, true)
 end
 
@@ -135,6 +141,7 @@ local forceload_block = function(new_pos, next_player)
 			minetest.pos_to_string(new_pos) .. " on behalf of player " .. next_player ..
 			" - possibly exceeded hard forceload limit?")
 	else
+		minetest.debug("forceload_block at " .. minetest.pos_to_string(new_pos))
 		call_on_forceload_block(new_pos, next_player, 0)
 	end
 end
@@ -150,26 +157,45 @@ end
 -- (pos) when the block's forceload ends.
 
 dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
-	if forceload_data[player_name] == nil then
-		forceload_data[player_name] = {}
+	if forceload_data.players[player_name] == nil then
+		forceload_data.players[player_name] = {}
 	end
-	local player_data = forceload_data[player_name]
-	table.insert(player_data, pos)
-	save_data()
+	local player_data = forceload_data.players[player_name]
+	local already_added = false
+	for _, already_pos in ipairs(player_data) do
+		if vector.equals(pos, already_pos) then
+			already_added = true
+			break
+		end
+	end
+	if not already_added then
+		table.insert(player_data, pos)
+		save_data()
+	end
 	
 	if usurp_active then
 		--reverse iterate through active positions and replace the first
-		--one that belongs to the player
+		--one that belongs to the player. If it was marked as pending removal, clear that mark.
 		for i = #active_positions, 1, -1 do
 			local active_pos = active_positions[i]
-			for _, player_pos in ipairs(player_data) do
+			for pi, player_pos in ipairs(player_data) do
 				if vector.equals(active_pos, player_pos) then
 					local old_pos = active_positions[i]
+					minetest.debug("usurping " .. minetest.pos_to_string(old_pos) .. " with " .. minetest.pos_to_string(pos))
 					active_positions[i] = pos
 					-- update the forceload if the usurped position is in a new map block
 					if not vector.equals(get_blockpos(old_pos), get_blockpos(pos)) then
 						forceload_free_block(old_pos)
 						forceload_block(pos, player_name)
+					end
+					
+					for i, pending in ipairs(forceload_data.pending_removal) do
+						if vector.equals(old_pos, pending) then
+							table.remove(forceload_data.pending_removal, i)
+							table.remove(player_data, pi)
+							save_data()
+							break
+						end
 					end
 					return
 				end
@@ -178,60 +204,87 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 	end	
 end
 
+local move_anchor_in_pos_list = function(old_pos, new_pos, pos_list, player)
+	for i, anchor_pos in ipairs(pos_list) do
+		if vector.equals(anchor_pos, old_pos) then
+			pos_list[i] = new_pos
+			for j, active_pos in ipairs(active_positions) do
+				if active_pos == anchor_pos then
+					--TODO check for pending removal, clean those up
+				
+					active_positions[j] = new_pos
+					-- update the forceload if the new position is in a new map block
+					if not vector.equals(get_blockpos(old_pos), get_blockpos(new_pos)) then
+						forceload_free_block(old_pos)
+						forceload_block(new_pos, player)
+					end
+				end
+			end
+			return true
+		end
+	end
+end
+
 -- If player_name_check is not nil, will check to ensure that the player owns the
 -- forceload anchor before moving it.
 dynamic_forceload.move_anchor = function(old_pos, new_pos, player_name_check)
-	for player, pos_list in pairs(forceload_data) do
-		for i, anchor_pos in ipairs(pos_list) do
-			if vector.equals(anchor_pos, old_pos) then
-				if player_name_check == nil or player_name_check == player then
-					pos_list[i] = new_pos
-					for j, active_pos in ipairs(active_positions) do
-						if active_pos == anchor_pos then
-							active_positions[j] = new_pos
-							-- update the forceload if the new position is in a new map block
-							if not vector.equals(get_blockpos(old_pos), get_blockpos(new_pos)) then
-								forceload_free_block(old_pos)
-								forceload_block(new_pos, player)
-							end
-						end
-					end
-					return true
-				else
-					minetest.log("action", "[dynamic_forceload] unable to move forceload " ..
-						minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos) ..
-						": anchor belongs to player " .. player .. " but name check was set to " ..
-						player_name_check)
-					return false
-				end
+	if player_name_check == nil then
+		for player, pos_list in pairs(forceload_data.players) do
+			if move_anchor_in_pos_list(old_pos, new_pos, pos_list, player) then
+				return true
+			end
+		end
+	else
+		local pos_list = forceload_data.players[player_name_check]
+		if pos_list ~= nil then
+			if move_anchor_in_pos_list(old_pos, new_pos, pos_list, player_name_check) then
+				return true
 			end
 		end
 	end
-	minetest.log("error", "[dynamic_forceload] unable to move forceload " ..
-		minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos) ..
-		": old anchor position was not registered.")
+	minetest.log("action", "[dynamic_forceload] unable to move forceload " ..
+		minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos))
 	return false
 end
 
-dynamic_forceload.remove_anchor = function(pos)
+dynamic_forceload.remove_anchor = function(pos, delay_active_removal)
+
+	local active_index = nil
+	for i, active_pos in ipairs(active_positions) do
+		if vector.equals(pos, active_pos) then
+			active_index = i
+		end
+	end
+	
+	-- If it's active and we want to delay its removal then just add it to the pending list
+	if delay_active_removal and active_index ~= nil then
+		table.insert(forceload_data.pending_removal, pos)
+		save_data()
+		return		
+	end
+
 	-- remove from forceload_data
-	for player, pos_list in pairs(forceload_data) do
+	for player, pos_list in pairs(forceload_data.players) do
 		for i, anchor_pos in ipairs(pos_list) do
 			if vector.equals(pos, anchor_pos) then
 				table.remove(pos_list, i)
 				if table.getn(pos_list) == 0 then
-					forceload_data[player] = nil
+					forceload_data.players[player] = nil
+				end
+				for pending_index, pending_pos in ipairs(forceload_data.pending_removal) do
+					if vector.equals(pos, pending_pos) then
+						table.remove(forceload_data.pending_removal, pending_index)
+						break
+					end
 				end
 				save_data()
 				
 				-- If the position is currently forceloaded, remove it and trigger an update
-				for i, active_pos in ipairs(active_positions) do
-					if vector.equals(pos, active_pos) then
-						forceload_free_block(pos)
-						table.remove(active_pos, i)
-						rotate_active()
-						break
-					end
+				if active_index ~= nil then
+					forceload_free_block(pos)
+					table.remove(active_positions, active_index)					
+					rotate_active()
+					break
 				end
 	
 				return
@@ -242,21 +295,20 @@ end
 
 rotate_active = function()
 	--minetest.debug("rotate_active called")
-	--minetest.debug(dump(forceload_data))
 
 	-- if there are no positions to load, do nothing.
-	if next(forceload_data) == nil then return end
+	if next(forceload_data.players) == nil then return end
 	
 	-- if the latest player's had his last position removed, we've lost our bearings in the player queue. Reset.
-	if latest_player and forceload_data[latest_player] == nil then latest_player = nil end
+	if latest_player and forceload_data.players[latest_player] == nil then latest_player = nil end
 	
-	local next_player = next(forceload_data, latest_player)
+	local next_player = next(forceload_data.players, latest_player)
 	if next_player == nil then
-		next_player = next(forceload_data) -- we've run off the end of the players, go back to the beginning
+		next_player = next(forceload_data.players) -- we've run off the end of the players, go back to the beginning
 	end
 	latest_player = next_player
 	
-	local next_player_positions = forceload_data[next_player]
+	local next_player_positions = forceload_data.players[next_player]
 	if player_current_index[next_player] == nil or player_current_index[next_player] > table.getn(next_player_positions) - 1 then
 		-- if we've gone off the end of the list of positions, or this player has never gone before, reset to beginning
 		player_current_index[next_player] = 0
@@ -264,6 +316,16 @@ rotate_active = function()
 	player_current_index[next_player] = player_current_index[next_player] + 1
 	
 	local new_pos = next_player_positions[player_current_index[next_player]]
+	
+	-- If the new position is pending removal, remove it.
+	-- This can occur if there aren't enough forceload anchors to exceed the
+	-- forceload limit, which would result in pending removals never being removed
+	for i, pending in ipairs(forceload_data.pending_removal) do
+		if vector.equals(new_pos, pending) then
+			dynamic_forceload.remove_anchor(new_pos)
+			return
+		end
+	end
 	
 	for _, active_pos in ipairs(active_positions) do
 		if vector.equals(new_pos, active_pos) then
@@ -283,7 +345,15 @@ rotate_active = function()
 		forceload_free_block(deactivating_pos)
 		--minetest.debug("Over active limit, removing " .. minetest.pos_to_string(active_positions[1]))
 		table.remove(active_positions, 1)
+		
+		-- If the active position we're removing was pending removal, actually remove it
+		for i, pending in ipairs(forceload_data.pending_removal) do
+			if vector.equals(deactivating_pos, pending) then
+				dynamic_forceload.remove_anchor(deactivating_pos)
+			end
+		end
 	end	
+	save_data()
 	
 	-- forceload *after* free_block is called in case these nodes are in the same block or in case we're at the hard limit
 	forceload_block(new_pos, next_player)
@@ -294,7 +364,7 @@ read_data()
 -- After initializing immediately fill the queue with an initial set of forceloads
 minetest.after(1, function()
 	local count = 0
-	for _, position_list in pairs(forceload_data) do
+	for _, position_list in pairs(forceload_data.players) do
 		count = count + table.getn(position_list)
 		if count > active_limit then
 			count = active_limit

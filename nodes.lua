@@ -28,11 +28,12 @@ minetest.register_node("dynamic_forceload:anchor",{
     }}},
 	groups = {cracky = 3, oddly_breakable_by_hand = 2},
 	after_destruct = function(pos)
+		minetest.debug("destruct")
 		dynamic_forceload.remove_anchor(pos)
 	end,
 	after_place_node = function(pos, placer)
-		if not minetest.check_player_privs(placer:get_player_name(),
-				{forceload = true}) then
+		minetest.debug("after place " .. placer:get_player_name())
+		if not minetest.check_player_privs(placer:get_player_name(), {forceload = true}) then
 			minetest.chat_send_player(placer:get_player_name(), S("The forceload privilege is required to register this location for continued timeflow."))
 			minetest.swap_node(pos, {name="dynamic_forceload:anchor_inert"})
 		else
@@ -64,4 +65,8 @@ if minetest.get_modpath("default") then
 			{"default:glass", "default:glass", "default:glass"}
 		}
 	})
+end
+
+if minetest.get_modpath("mesecons_mvps") then
+	mesecon.register_mvps_stopper("dynamic_forceload:anchor")
 end
