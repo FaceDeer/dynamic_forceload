@@ -39,21 +39,7 @@ minetest.register_node("dynamic_forceload:anchor",{
 		else
 			dynamic_forceload.add_anchor(pos, placer:get_player_name())
 		end
---		minetest.get_node_timer(pos):start(1)
 	end,
-	
---	on_forceload_block = function(pos, name)
---		minetest.debug("On forceload block called at " .. minetest.pos_to_string(pos) .. " on behalf of player " .. name)
---		minetest.get_node_timer(pos):start(1)
---	end,
---	on_forceload_free_block = function(pos)
---		minetest.debug("On forceload free block called at " .. minetest.pos_to_string(pos))
---		minetest.get_node_timer(pos):stop()
---	end,
---	on_timer = function(pos, elapsed)
---		minetest.chat_send_all("dynamic_forceload at " .. minetest.pos_to_string(pos) .. " ticked.")
---		minetest.get_node_timer(pos):start(1)
---	end,
 })
 
 if minetest.get_modpath("default") then

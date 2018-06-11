@@ -113,7 +113,6 @@ local forceload_free_block = function(deactivating_pos)
 	if deactivating_def.on_forceload_free_block then
 		deactivating_def.on_forceload_free_block(deactivating_pos)
 	end
-	minetest.debug("forcload_free_block at " .. minetest.pos_to_string(deactivating_pos))
 	minetest.forceload_free_block(deactivating_pos, true)
 end
 
@@ -143,7 +142,6 @@ local forceload_block = function(new_pos, next_player)
 			minetest.pos_to_string(new_pos) .. " on behalf of player " .. next_player ..
 			" - possibly exceeded hard forceload limit?")
 	else
-		minetest.debug("forceload_block at " .. minetest.pos_to_string(new_pos))
 		call_on_forceload_block(new_pos, next_player, 0)
 	end
 end
@@ -183,7 +181,6 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 			for pi, player_pos in ipairs(player_data) do
 				if vector.equals(active_pos, player_pos) then
 					local old_pos = active_positions[i]
-					minetest.debug("usurping " .. minetest.pos_to_string(old_pos) .. " with " .. minetest.pos_to_string(pos))
 					active_positions[i] = pos
 					-- update the forceload if the usurped position is in a new map block
 					if not vector.equals(get_blockpos(old_pos), get_blockpos(pos)) then
@@ -202,7 +199,7 @@ local move_anchor_in_pos_list = function(old_pos, new_pos, pos_list, player)
 		if vector.equals(anchor_pos, old_pos) then
 			pos_list[i] = new_pos
 			for j, active_pos in ipairs(active_positions) do
-				if active_pos == anchor_pos then
+				if vector.equals(active_pos, anchor_pos) then
 					active_positions[j] = new_pos
 					-- update the forceload if the new position is in a new map block
 					if not vector.equals(get_blockpos(old_pos), get_blockpos(new_pos)) then
@@ -233,7 +230,7 @@ dynamic_forceload.move_anchor = function(old_pos, new_pos, player_name_check)
 			end
 		end
 	end
-	minetest.log("action", "[dynamic_forceload] unable to move forceload " ..
+	minetest.log("error", "[dynamic_forceload] unable to move forceload " ..
 		minetest.pos_to_string(old_pos) .. " to " .. minetest.pos_to_string(new_pos))
 	return false
 end
@@ -272,8 +269,6 @@ dynamic_forceload.remove_anchor = function(pos)
 end
 
 rotate_active = function()
-	--minetest.debug("rotate_active called")
-
 	-- if there are no positions to load, do nothing.
 	if next(forceload_data.players) == nil then return end
 	
@@ -297,21 +292,18 @@ rotate_active = function()
 	
 	for _, active_pos in ipairs(active_positions) do
 		if vector.equals(new_pos, active_pos) then
-			--minetest.debug("position already active: " .. minetest.pos_to_string(new_pos))
 			return -- the position is already active, do nothing
 		end	
 	end
 	
 	-- insert the new pos at the end and forceload it
-	minetest.log("info", "[dynamic_forceload] " .. next_player .. " gets to run the block at " .. minetest.pos_to_string(new_pos))
+	minetest.log("action", "[dynamic_forceload] " .. next_player .. " gets to run the block at " .. minetest.pos_to_string(new_pos))
 	table.insert(active_positions, new_pos)
-	--minetest.debug(dump(active_positions))
 	
 	-- if we're over the limit, remove the oldest active position
 	if table.getn(active_positions) > active_limit then
 		local deactivating_pos = active_positions[1]
 		forceload_free_block(deactivating_pos)
-		--minetest.debug("Over active limit, removing " .. minetest.pos_to_string(active_positions[1]))
 		table.remove(active_positions, 1)
 	end	
 	save_data()
