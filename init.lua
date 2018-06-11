@@ -9,9 +9,6 @@ local forceload_filename = worldpath.."/dynamic_forceload.json"
 -- in-memory copy of data stored in dynamic_forceload.json
 local forceload_data = {}
 forceload_data.players = {}
--- Forceloaded positions that are currently active but that should be
--- removed from forceload_data as soon as they're no longer active
-forceload_data.pending_removal = {}
 
 local BLOCKSIZE = core.MAP_BLOCKSIZE
 local function get_blockpos(pos)
@@ -71,6 +68,10 @@ minetest.register_chatcommand("forceloads", {
 				for player, _ in pairs(forceload_data.players) do
 					output = output .. "\n" .. get_forceloads_for(player)
 				end
+				output = output .. "\n\nCurrently active:\n"
+				for _, active in ipairs(active_positions) do
+					output = output .. " " .. minetest.pos_to_string(active)
+				end
 				return true, output
 			end
 		else
@@ -78,6 +79,7 @@ minetest.register_chatcommand("forceloads", {
 		end
 	end,                                      
 })
+
 
 -- Json storage
 
@@ -99,8 +101,8 @@ local read_data = function()
 	end
 	if forceload_data == nil then
 		forceload_data = {}
+		forceload_data.version = 1 -- Only update this when making compatibility-breaking changes to the forceload data.
 		forceload_data.players = {}
-		forceload_data.pending_removal = {}
 		save_data()
 	end
 end
@@ -175,7 +177,7 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 	
 	if usurp_active then
 		--reverse iterate through active positions and replace the first
-		--one that belongs to the player. If it was marked as pending removal, clear that mark.
+		--one that belongs to the player.
 		for i = #active_positions, 1, -1 do
 			local active_pos = active_positions[i]
 			for pi, player_pos in ipairs(player_data) do
@@ -187,15 +189,6 @@ dynamic_forceload.add_anchor = function(pos, player_name, usurp_active)
 					if not vector.equals(get_blockpos(old_pos), get_blockpos(pos)) then
 						forceload_free_block(old_pos)
 						forceload_block(pos, player_name)
-					end
-					
-					for i, pending in ipairs(forceload_data.pending_removal) do
-						if vector.equals(old_pos, pending) then
-							table.remove(forceload_data.pending_removal, i)
-							table.remove(player_data, pi)
-							save_data()
-							break
-						end
 					end
 					return
 				end
@@ -210,8 +203,6 @@ local move_anchor_in_pos_list = function(old_pos, new_pos, pos_list, player)
 			pos_list[i] = new_pos
 			for j, active_pos in ipairs(active_positions) do
 				if active_pos == anchor_pos then
-					--TODO check for pending removal, clean those up
-				
 					active_positions[j] = new_pos
 					-- update the forceload if the new position is in a new map block
 					if not vector.equals(get_blockpos(old_pos), get_blockpos(new_pos)) then
@@ -247,7 +238,7 @@ dynamic_forceload.move_anchor = function(old_pos, new_pos, player_name_check)
 	return false
 end
 
-dynamic_forceload.remove_anchor = function(pos, delay_active_removal)
+dynamic_forceload.remove_anchor = function(pos)
 
 	local active_index = nil
 	for i, active_pos in ipairs(active_positions) do
@@ -256,13 +247,6 @@ dynamic_forceload.remove_anchor = function(pos, delay_active_removal)
 		end
 	end
 	
-	-- If it's active and we want to delay its removal then just add it to the pending list
-	if delay_active_removal and active_index ~= nil then
-		table.insert(forceload_data.pending_removal, pos)
-		save_data()
-		return		
-	end
-
 	-- remove from forceload_data
 	for player, pos_list in pairs(forceload_data.players) do
 		for i, anchor_pos in ipairs(pos_list) do
@@ -270,12 +254,6 @@ dynamic_forceload.remove_anchor = function(pos, delay_active_removal)
 				table.remove(pos_list, i)
 				if table.getn(pos_list) == 0 then
 					forceload_data.players[player] = nil
-				end
-				for pending_index, pending_pos in ipairs(forceload_data.pending_removal) do
-					if vector.equals(pos, pending_pos) then
-						table.remove(forceload_data.pending_removal, pending_index)
-						break
-					end
 				end
 				save_data()
 				
@@ -317,16 +295,6 @@ rotate_active = function()
 	
 	local new_pos = next_player_positions[player_current_index[next_player]]
 	
-	-- If the new position is pending removal, remove it.
-	-- This can occur if there aren't enough forceload anchors to exceed the
-	-- forceload limit, which would result in pending removals never being removed
-	for i, pending in ipairs(forceload_data.pending_removal) do
-		if vector.equals(new_pos, pending) then
-			dynamic_forceload.remove_anchor(new_pos)
-			return
-		end
-	end
-	
 	for _, active_pos in ipairs(active_positions) do
 		if vector.equals(new_pos, active_pos) then
 			--minetest.debug("position already active: " .. minetest.pos_to_string(new_pos))
@@ -345,13 +313,6 @@ rotate_active = function()
 		forceload_free_block(deactivating_pos)
 		--minetest.debug("Over active limit, removing " .. minetest.pos_to_string(active_positions[1]))
 		table.remove(active_positions, 1)
-		
-		-- If the active position we're removing was pending removal, actually remove it
-		for i, pending in ipairs(forceload_data.pending_removal) do
-			if vector.equals(deactivating_pos, pending) then
-				dynamic_forceload.remove_anchor(deactivating_pos)
-			end
-		end
 	end	
 	save_data()
 	
