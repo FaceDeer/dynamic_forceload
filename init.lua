@@ -25,6 +25,16 @@ local active_block_range = tonumber(minetest.settings:get("active_block_range"))
 --end
 
 local hard_limit = tonumber(minetest.settings:get("max_forceloaded_blocks")) or 16
+
+--Maximum number of blocks that can be queued for loading
+--local emergequeue_limit_total = tonumber(minetest.settings:get("emergequeue_limit_total")) or 256
+-- Maximum number of blocks that can be queued to be loaded from file
+local emergequeue_limit_diskonly = tonumber(minetest.settings:get("emergequeue_limit_diskonly")) or 32
+--How much the server will wait before unloading unsed mapblocks
+local server_unload_unused_data_timeout = tonumber(minetest.settings:get("server_unload_unused_data_timeout")) or 29
+
+
+
 local rotation_time = tonumber(minetest.setting_get("dynamic_forceload_rotation_time")) or 60
 local active_limit = math.min(tonumber(minetest.setting_get("dynamic_forceload_active_limit")) or 8, hard_limit)
 
@@ -312,6 +322,15 @@ rotate_active = function()
 	forceload_block(new_pos, next_player)
 end
 
+local emerge_active = function()
+	for _, pos in ipairs(active_positions) do
+		minetest.debug("emerging " .. minetest.pos_to_string(pos))
+		minetest.emerge_area(
+			vector.add(pos, -BLOCKSIZE*active_block_range),
+			vector.add(pos, BLOCKSIZE*active_block_range))
+	end
+end
+
 read_data()
 
 -- After initializing immediately fill the queue with an initial set of forceloads
@@ -331,10 +350,17 @@ minetest.after(1, function()
 end)
 
 local timer = 0
+local emerge_timer = 0
 minetest.register_globalstep(function(dtime)
 	timer = timer + dtime
+	emerge_timer = emerge_timer + dtime
 	if timer > rotation_time then
 		timer = timer - rotation_time
 		rotate_active()
+	end
+	
+	if emerge_timer > server_unload_unused_data_timeout then
+		emerge_timer = emerge_timer - server_unload_unused_data_timeout
+		emerge_active()
 	end
 end)
